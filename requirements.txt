@@ -1,0 +1,10 @@
+# requirements.txt
+pandas>=2.2
+numpy>=1.26
+scikit-learn>=1.4
+tensorflow>=2.15
+xgboost>=2.1
+yfinance>=0.2.44
+openpyxl>=3.1
+tqdm>=4.66
+matplotlib>=3.8
