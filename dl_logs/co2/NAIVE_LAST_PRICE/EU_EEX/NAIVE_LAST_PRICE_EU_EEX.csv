@@ -1,0 +1,2 @@
+market,model_name,config_index,model_hyperparameters_dict,start_date,end_date,test_data_values_list,test_data_model_predictions_list
+EU_EEX,NAIVE_LAST_PRICE,-1,{},2022-12-08 00:00:00,2022-12-29 00:00:00,"[87.76, 90.1, 88.59, 86.56, 85.5, 83.8, 84.11, 86.95, 84.63, 85.99, 86.09, 85.2875, 85.02, 82.8, 81.29, 80.76]","[88.62, 87.76, 90.1, 88.59, 86.56, 85.5, 83.8, 84.11, 86.95, 84.63, 85.99, 86.09, 85.2875, 85.02, 82.8, 81.29]"

@@ -1,0 +1,2 @@
+market,model_name,config_index,model_hyperparameters_dict,start_date,end_date,test_data_values_list,test_data_model_predictions_list
+RGGI,NAIVE_LAST_PRICE,-1,{},2022-12-08 00:00:00,2022-12-29 00:00:00,"[13.22, 13.19, 13.14, 13.1, 13.0, 13.12, 13.15, 13.34, 13.3, 13.27, 13.25, 13.4375, 13.5, 13.4, 13.3, 13.43]","[13.1, 13.22, 13.19, 13.14, 13.1, 13.0, 13.12, 13.15, 13.34, 13.3, 13.27, 13.25, 13.4375, 13.5, 13.4, 13.3]"

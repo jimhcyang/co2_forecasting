@@ -1,0 +1,2 @@
+market,model_name,config_index,model_hyperparameters_dict,start_date,end_date,test_data_values_list,test_data_model_predictions_list
+NewZealand,NAIVE_LAST_PRICE,-1,{},2022-10-20 00:00:00,2022-10-28 00:00:00,"[81.2, 81.2, 81.25, 82.0, 82.5, 84.75, 85.0]","[80.9, 81.2, 81.2, 81.25, 82.0, 82.5, 84.75]"

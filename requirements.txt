@@ -1,10 +1,24 @@
-# requirements.txt
-pandas>=2.2
+# Core ML stack (PyTorch + friends)
+# pip install torch==2.8.0 torchvision==0.23.0 torchaudio==2.8.0 --index-url https://download.pytorch.org/whl/cu129
+torch==2.8.0
+torchvision==0.23.0
+torchaudio==2.8.0
+
+# Numerics / data handling
 numpy>=1.26
+pandas>=2.2
 scikit-learn>=1.4
-tensorflow>=2.15
+
+# Gradient boosting
 xgboost>=2.1
+
+# Data sources / IO
 yfinance>=0.2.44
 openpyxl>=3.1
+
+# Utilities
 tqdm>=4.66
 matplotlib>=3.8
+
+# Jupyter / VS Code kernel
+ipykernel>=6.0

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-# co2_hyperparam_pipeline.py
+# co2_hyperparam_pipeline.py (PyTorch version)
 #
 # Grid-search training for CO2 markets using *processed* feature panels:
 #
@@ -14,7 +14,6 @@ from __future__ import annotations
 #   - Time slice (defaults, overridable via CLI):
 #         start_date = 2022-09-01
 #         end_date   = 2022-10-31
-#       (Two full months: September + October 2022.)
 #
 #   - Target:
 #         y_t = Price_{t+1}   (next-day price)
@@ -44,7 +43,7 @@ from __future__ import annotations
 #         batch_size     ∈ {16, 32, 64}
 #         epochs         ∈ {32}
 #
-#         => 3 * 3 * 3 * 3 * 3 * 1 = 243 configs per model.
+#         => 3 * 3 * 3 * 3 * 3 * 2 = 486 configs per model.
 #
 #       TCN-specific grid:
 #         channels       ∈ {32, 64, 128}
@@ -55,11 +54,11 @@ from __future__ import annotations
 #         batch_size     ∈ {16, 32, 64}
 #         epochs         ∈ {32}
 #
-#         => 3 * 3 * 3 * 3 * 3 * 1 = 243 configs.
+#         => 3 * 3 * 3 * 3 * 3 * 2 = 486 configs.
 #
 #   - Output:
 #       results/co2_hparam_metrics.csv  (all markets, all models, all configs)
-#       results/co2_models/<market>_<model>_best.keras  (best-R² weights per model)
+#       results/co2_models/<market>_<model>_best.pt  (best-R² weights per model)
 #       dl_logs/co2/<MODEL>/<MARKET>/<MODEL>_<MARKET>.csv
 #           (per-config logs with dates, y_true list, y_pred list, and
 #            model_hyperparameters_dict)
@@ -69,18 +68,20 @@ import json
 from pathlib import Path
 from typing import Dict, List, Tuple, Any
 
+import itertools
+import gc
+
 import numpy as np
 import pandas as pd
-import itertools
 from tqdm.auto import tqdm
 
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, r2_score
 
-import tensorflow as tf
-from tensorflow import keras
-from tensorflow.keras import layers, backend as K
-
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
 # -------------------------------------------------------------------
 # PATHS & GLOBAL CONFIG
@@ -109,7 +110,7 @@ CO2_PROCESSED_FILES: Dict[str, str] = {
 
 # Defaults (overridable via CLI)
 START_DATE_DEFAULT = "2022-09-01"
-END_DATE_DEFAULT = "2022-10-31"
+END_DATE_DEFAULT = "2022-12-31"
 LOOKBACK_DEFAULT = 9  # 9 days history + 1 day ahead = 10-day rolling window
 TRAIN_RATIO_DEFAULT = 0.8
 
@@ -122,7 +123,7 @@ HP_NUM_LAYERS = [2, 3, 4]
 HP_ACTIVATIONS = ["relu", "tanh", "swish"]
 HP_LR = [1e-2, 3e-3, 1e-3]
 HP_BATCH_SIZE = [16, 32, 64]
-HP_EPOCHS = [32]
+HP_EPOCHS = [32, 64]
 
 # Core grid size for MLP/RNN/LSTM/GRU
 GRID_SIZE_CORE = (
@@ -148,17 +149,32 @@ GRID_SIZE_TCN = (
     * len(HP_EPOCHS)
 )
 
-assert GRID_SIZE_CORE == 243, f"CORE grid size is {GRID_SIZE_CORE}, expected 243"
-assert GRID_SIZE_TCN == 243, f"TCN grid size is {GRID_SIZE_TCN}, expected 243"
+assert GRID_SIZE_CORE == 486, f"CORE grid size is {GRID_SIZE_CORE}, expected 486"
+assert GRID_SIZE_TCN == 486, f"TCN grid size is {GRID_SIZE_TCN}, expected 486"
 
 
 # -------------------------------------------------------------------
 # UTILITIES
 # -------------------------------------------------------------------
 
+def print_gpu_info(device: torch.device) -> None:
+    if device.type == "cuda":
+        try:
+            name = torch.cuda.get_device_name(0)
+        except Exception:
+            name = "Unknown CUDA GPU"
+        print(f"[INFO] Using GPU: {name}")
+        print(f"[INFO] Device: {device}")
+    else:
+        print("[INFO] Using CPU only.")
+        print(f"[INFO] Device: {device}")
+
+
 def set_global_seeds(seed: int = 42) -> None:
     np.random.seed(seed)
-    tf.random.set_seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
@@ -330,173 +346,248 @@ def make_sequence_dataset(
 
 
 # -------------------------------------------------------------------
-# MODEL BUILDERS
+# MODEL BUILDERS (PyTorch)
 # -------------------------------------------------------------------
 
-def build_mlp(
-    input_dim: int,
-    hidden_units: int,
-    num_layers: int,
-    activation: str,
-    learning_rate: float,
-) -> keras.Model:
-    model = keras.Sequential()
-    model.add(layers.Input(shape=(input_dim,)))
-    for _ in range(num_layers):
-        model.add(layers.Dense(hidden_units, activation=activation))
-    model.add(layers.Dense(1))
-    opt = keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss="mse")
-    return model
+class Swish(nn.Module):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x * torch.sigmoid(x)
 
 
-def build_rnn(
-    input_shape: Tuple[int, int],
-    hidden_units: int,
-    num_layers: int,
-    activation: str,
-    learning_rate: float,
-) -> keras.Model:
-    model = keras.Sequential()
-    model.add(layers.Input(shape=input_shape))
-    for i in range(num_layers):
-        return_sequences = i < num_layers - 1
-        model.add(
-            layers.SimpleRNN(
-                hidden_units,
-                activation="tanh",
-                return_sequences=return_sequences,
-            )
+def get_activation(name: str) -> nn.Module:
+    name = name.lower()
+    if name == "relu":
+        return nn.ReLU()
+    if name == "tanh":
+        return nn.Tanh()
+    if name == "swish":
+        return Swish()
+    raise ValueError(f"Unknown activation: {name}")
+
+
+class MLPRegressor(nn.Module):
+    def __init__(self, input_dim: int, hidden_units: int, num_layers: int, activation: str):
+        super().__init__()
+        layers_list: List[nn.Module] = []
+        in_dim = input_dim
+        for _ in range(num_layers):
+            layers_list.append(nn.Linear(in_dim, hidden_units))
+            layers_list.append(get_activation(activation))
+            in_dim = hidden_units
+        self.hidden = nn.Sequential(*layers_list)
+        self.out = nn.Linear(in_dim, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.hidden(x)
+        x = self.out(x)
+        return x
+
+
+class RNNRegressor(nn.Module):
+    def __init__(self, input_size: int, hidden_units: int, num_layers: int, activation: str):
+        super().__init__()
+        self.rnn = nn.RNN(
+            input_size=input_size,
+            hidden_size=hidden_units,
+            num_layers=num_layers,
+            batch_first=True,
         )
-    # activation here is for the final dense head (relu/tanh/swish)
-    model.add(layers.Dense(1, activation=activation))
-    opt = keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss="mse")
-    return model
+        self.fc = nn.Linear(hidden_units, 1)
+        self.out_act = get_activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, input_size)
+        out, _ = self.rnn(x)
+        last = out[:, -1, :]  # (batch, hidden_units)
+        out = self.fc(last)   # (batch, 1)
+        out = self.out_act(out)
+        return out
 
 
-def build_lstm(
-    input_shape: Tuple[int, int],
-    hidden_units: int,
-    num_layers: int,
-    activation: str,
-    learning_rate: float,
-) -> keras.Model:
-    model = keras.Sequential()
-    model.add(layers.Input(shape=input_shape))
-    for i in range(num_layers):
-        return_sequences = i < num_layers - 1
-        model.add(
-            layers.LSTM(
-                hidden_units,
-                activation="tanh",
-                recurrent_activation="sigmoid",
-                return_sequences=return_sequences,
-            )
+class LSTMRegressor(nn.Module):
+    def __init__(self, input_size: int, hidden_units: int, num_layers: int, activation: str):
+        super().__init__()
+        self.lstm = nn.LSTM(
+            input_size=input_size,
+            hidden_size=hidden_units,
+            num_layers=num_layers,
+            batch_first=True,
         )
-    model.add(layers.Dense(1, activation=activation))
-    opt = keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss="mse")
-    return model
+        self.fc = nn.Linear(hidden_units, 1)
+        self.out_act = get_activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.lstm(x)
+        last = out[:, -1, :]
+        out = self.fc(last)
+        out = self.out_act(out)
+        return out
 
 
-def build_gru(
-    input_shape: Tuple[int, int],
-    hidden_units: int,
-    num_layers: int,
-    activation: str,
-    learning_rate: float,
-) -> keras.Model:
-    model = keras.Sequential()
-    model.add(layers.Input(shape=input_shape))
-    for i in range(num_layers):
-        return_sequences = i < num_layers - 1
-        model.add(
-            layers.GRU(
-                hidden_units,
-                activation="tanh",
-                recurrent_activation="sigmoid",
-                return_sequences=return_sequences,
-            )
+class GRURegressor(nn.Module):
+    def __init__(self, input_size: int, hidden_units: int, num_layers: int, activation: str):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_units,
+            num_layers=num_layers,
+            batch_first=True,
         )
-    model.add(layers.Dense(1, activation=activation))
-    opt = keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss="mse")
-    return model
+        self.fc = nn.Linear(hidden_units, 1)
+        self.out_act = get_activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out, _ = self.gru(x)
+        last = out[:, -1, :]
+        out = self.fc(last)
+        out = self.out_act(out)
+        return out
 
 
-def _tcn_residual_block(
-    x: keras.Tensor,
-    channels: int,
-    kernel_size: int,
-    activation: str,
-    dilation_rate: int,
-) -> Tuple[keras.Tensor, int]:
-    conv1 = layers.Conv1D(
-        filters=channels,
-        kernel_size=kernel_size,
-        padding="causal",
-        dilation_rate=dilation_rate,
-    )(x)
-    act1 = layers.Activation(activation)(conv1)
-
-    conv2 = layers.Conv1D(
-        filters=channels,
-        kernel_size=kernel_size,
-        padding="causal",
-        dilation_rate=dilation_rate,
-    )(act1)
-    act2 = layers.Activation(activation)(conv2)
-
-    # Residual path to match shape if needed
-    if x.shape[-1] != channels:
-        res = layers.Conv1D(filters=channels, kernel_size=1, padding="same")(x)
-    else:
-        res = x
-
-    out = layers.Add()([act2, res])
-    out = layers.Activation(activation)(out)
-
-    return out, dilation_rate * 2
-
-
-def build_tcn(
-    input_shape: Tuple[int, int],
-    blocks: int,
-    channels: int,
-    kernel_size: int,
-    activation: str,
-    learning_rate: float,
-) -> keras.Model:
+class Chomp1d(nn.Module):
     """
-    Temporal Convolutional Network (TCN) with:
-      - 'blocks' residual blocks
-      - 2 Conv1D layers per block (same dilation within a block)
-      - exponentially increasing dilations: 1, 2, 4, ...
+    Trim padding on the right to keep output length equal to input length,
+    emulating 'causal' padding.
     """
-    inputs = keras.Input(shape=input_shape)
-    x = inputs
-    dilation_rate = 1
-    for _ in range(blocks):
-        x, dilation_rate = _tcn_residual_block(
-            x,
-            channels=channels,
+    def __init__(self, chomp_size: int):
+        super().__init__()
+        self.chomp_size = chomp_size
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.chomp_size == 0:
+            return x
+        return x[:, :, :-self.chomp_size]
+
+
+class TemporalBlock(nn.Module):
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int,
+        dilation: int,
+        activation: str,
+    ):
+        super().__init__()
+        padding = (kernel_size - 1) * dilation
+
+        self.conv1 = nn.Conv1d(
+            in_channels=in_channels,
+            out_channels=out_channels,
             kernel_size=kernel_size,
-            activation=activation,
-            dilation_rate=dilation_rate,
+            padding=padding,
+            dilation=dilation,
         )
-    # Take last time step
-    x = layers.Lambda(lambda t: t[:, -1, :])(x)
-    outputs = layers.Dense(1)(x)
-    model = keras.Model(inputs, outputs)
-    opt = keras.optimizers.Adam(learning_rate=learning_rate)
-    model.compile(optimizer=opt, loss="mse")
-    return model
+        self.chomp1 = Chomp1d(padding)
+        self.act1 = get_activation(activation)
+
+        self.conv2 = nn.Conv1d(
+            in_channels=out_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation,
+        )
+        self.chomp2 = Chomp1d(padding)
+        self.act2 = get_activation(activation)
+
+        if in_channels != out_channels:
+            self.downsample = nn.Conv1d(in_channels, out_channels, kernel_size=1)
+        else:
+            self.downsample = None
+
+        self.out_act = get_activation(activation)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        out = self.conv1(x)
+        out = self.chomp1(out)
+        out = self.act1(out)
+
+        out = self.conv2(out)
+        out = self.chomp2(out)
+        out = self.act2(out)
+
+        res = x if self.downsample is None else self.downsample(x)
+        out = out + res
+        out = self.out_act(out)
+        return out
+
+
+class TCNRegressor(nn.Module):
+    def __init__(
+        self,
+        input_size: int,
+        channels: int,
+        num_blocks: int,
+        kernel_size: int,
+        activation: str,
+    ):
+        super().__init__()
+        layers_list: List[nn.Module] = []
+        in_channels = input_size
+        dilation = 1
+        for _ in range(num_blocks):
+            layers_list.append(
+                TemporalBlock(
+                    in_channels=in_channels,
+                    out_channels=channels,
+                    kernel_size=kernel_size,
+                    dilation=dilation,
+                    activation=activation,
+                )
+            )
+            in_channels = channels
+            dilation *= 2
+        self.network = nn.Sequential(*layers_list)
+        self.fc = nn.Linear(channels, 1)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (batch, seq_len, features) -> (batch, features, seq_len)
+        x = x.transpose(1, 2)
+        x = self.network(x)           # (batch, channels, seq_len)
+        x = x[:, :, -1]               # take last time step: (batch, channels)
+        out = self.fc(x)              # (batch, 1)
+        return out
 
 
 # -------------------------------------------------------------------
-# GRID SEARCH HELPERS
+# TRAINING HELPERS (PyTorch)
 # -------------------------------------------------------------------
+
+def train_and_predict_torch(
+    model: nn.Module,
+    device: torch.device,
+    X_tr: np.ndarray,
+    y_tr_s: np.ndarray,
+    X_te: np.ndarray,
+    batch_size: int,
+    epochs: int,
+) -> Tuple[np.ndarray, float]:
+    """
+    Generic training loop for a regression model.
+    Assumes y_tr_s is already scaled (StandardScaler), and X_* are numpy arrays.
+    Returns:
+        y_pred_s (numpy, scaled),
+        train_loss_last (float, final epoch average loss).
+    """
+    # Convert to tensors
+    X_tr_tensor = torch.from_numpy(X_tr).float().to(device)
+    y_tr_tensor = torch.from_numpy(y_tr_s.astype(np.float32)).view(-1, 1).to(device)
+    X_te_tensor = torch.from_numpy(X_te).float().to(device)
+
+    train_dataset = TensorDataset(X_tr_tensor, y_tr_tensor)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+
+    criterion = nn.MSELoss()
+    optimizer = optim.Adam(model.parameters(), lr=1.0)  # placeholder, will override outside
+    # We'll override lr outside via new optimizer; this function is called after optimizer is set.
+    # To avoid confusion, we re-create optimizer here with correct lr each call from grid.
+
+    # (We won't actually use this placeholder; see grid functions.)
+    del optimizer
+
+    return X_te_tensor, train_loader, criterion
+
 
 def run_core_grid_for_model(
     model_name: str,
@@ -512,14 +603,15 @@ def run_core_grid_for_model(
     input_dim: int,
     input_shape_seq: Tuple[int, int],
     market: str,
+    device: torch.device,
     max_configs: int | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Run the 243-config core grid for one of: MLP / RNN / LSTM / GRU.
+    Run the 486-config core grid for one of: MLP / RNN / LSTM / GRU.
     """
     results: List[Dict[str, Any]] = []
     best_r2 = -np.inf
-    best_model_path = MODELS_DIR / f"{market}_{model_name}_best.keras"
+    best_model_path = MODELS_DIR / f"{market}_{model_name}_best.pt"
 
     # Build full grid and optionally truncate for debugging
     grid = list(
@@ -538,46 +630,91 @@ def run_core_grid_for_model(
     total_configs = len(grid)
     print(f"[GRID] {market} - {model_name}: {total_configs} configs")
 
+    # Pre-convert test arrays (numpy -> torch) once per model type
+    if model_name == "mlp":
+        X_tr_base = X_tr_flat_s
+        X_te_base = X_te_flat_s
+    else:
+        X_tr_base = X_tr_seq_s
+        X_te_base = X_te_seq_s
+
     for config_idx, (hidden_units, num_layers, activation, lr, batch_size, epochs) in enumerate(
         tqdm(grid, desc=f"{market}-{model_name}", unit="cfg", leave=False)
     ):
         set_global_seeds(42)
-        K.clear_session()
 
+        # Build model
         if model_name == "mlp":
             model = build_fn(
                 input_dim=input_dim,
                 hidden_units=hidden_units,
                 num_layers=num_layers,
                 activation=activation,
-                learning_rate=lr,
             )
-            history = model.fit(
-                X_tr_flat_s,
-                y_tr_s,
-                epochs=epochs,
-                batch_size=batch_size,
-                verbose=0,
-            )
-            y_pred_s = model.predict(X_te_flat_s, verbose=0).ravel()
-        else:
-            # sequence models: RNN, LSTM, GRU
+        elif model_name == "rnn":
             model = build_fn(
-                input_shape=input_shape_seq,
+                input_size=input_shape_seq[1],
                 hidden_units=hidden_units,
                 num_layers=num_layers,
                 activation=activation,
-                learning_rate=lr,
             )
-            history = model.fit(
-                X_tr_seq_s,
-                y_tr_s,
-                epochs=epochs,
-                batch_size=batch_size,
-                verbose=0,
+        elif model_name == "lstm":
+            model = build_fn(
+                input_size=input_shape_seq[1],
+                hidden_units=hidden_units,
+                num_layers=num_layers,
+                activation=activation,
             )
-            y_pred_s = model.predict(X_te_seq_s, verbose=0).ravel()
+        elif model_name == "gru":
+            model = build_fn(
+                input_size=input_shape_seq[1],
+                hidden_units=hidden_units,
+                num_layers=num_layers,
+                activation=activation,
+            )
+        else:
+            raise ValueError(f"Unknown model_name: {model_name}")
 
+        model = model.to(device)
+
+        # Prepare data tensors and loaders
+        X_tr = X_tr_base
+        X_te = X_te_base
+
+        X_tr_tensor = torch.from_numpy(X_tr).float().to(device)
+        y_tr_tensor = torch.from_numpy(y_tr_s.astype(np.float32)).view(-1, 1).to(device)
+        X_te_tensor = torch.from_numpy(X_te).float().to(device)
+
+        train_dataset = TensorDataset(X_tr_tensor, y_tr_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        # Train loop
+        train_loss_last = None
+        for _epoch in range(epochs):
+            model.train()
+            epoch_loss = 0.0
+            n_samples = 0
+            for xb, yb in train_loader:
+                optimizer.zero_grad()
+                preds = model(xb)
+                loss = criterion(preds, yb)
+                loss.backward()
+                optimizer.step()
+                bs = xb.size(0)
+                epoch_loss += loss.item() * bs
+                n_samples += bs
+            train_loss_last = epoch_loss / max(n_samples, 1)
+
+        # Predict on test set
+        model.eval()
+        with torch.no_grad():
+            y_pred_s_tensor = model(X_te_tensor)
+        y_pred_s = y_pred_s_tensor.cpu().numpy().ravel()
+
+        # Inverse-transform target to price scale
         y_pred = sy.inverse_transform(y_pred_s.reshape(-1, 1)).ravel()
         metrics = compute_metrics(y_te, y_pred)
 
@@ -606,14 +743,20 @@ def run_core_grid_for_model(
             "model": model_name,
             "config_index": config_idx,
             **hyperparams,
-            "train_loss_last": float(history.history["loss"][-1]),
+            "train_loss_last": float(train_loss_last) if train_loss_last is not None else None,
             **metrics,
         }
         results.append(row)
 
         if metrics["R2"] > best_r2:
             best_r2 = metrics["R2"]
-            model.save(best_model_path)
+            torch.save(model.state_dict(), best_model_path)
+
+        # Free memory for this config
+        del model, optimizer, train_loader, train_dataset, X_tr_tensor, y_tr_tensor, X_te_tensor, y_pred_s_tensor
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     return results
 
@@ -627,14 +770,15 @@ def run_tcn_grid(
     sy: StandardScaler,
     input_shape_seq: Tuple[int, int],
     market: str,
+    device: torch.device,
     max_configs: int | None = None,
 ) -> List[Dict[str, Any]]:
     """
-    Run the 243-config grid for TCN.
+    Run the 486-config grid for TCN.
     """
     results: List[Dict[str, Any]] = []
     best_r2 = -np.inf
-    best_model_path = MODELS_DIR / f"{market}_tcn_best.keras"
+    best_model_path = MODELS_DIR / f"{market}_tcn_best.pt"
 
     grid = list(
         itertools.product(
@@ -652,28 +796,53 @@ def run_tcn_grid(
     total_configs = len(grid)
     print(f"[GRID] {market} - tcn: {total_configs} configs")
 
+    # Pre-convert data once
+    X_tr = X_tr_seq_s
+    X_te = X_te_seq_s
+
     for config_idx, (channels, blocks, activation, lr, batch_size, epochs) in enumerate(
         tqdm(grid, desc=f"{market}-tcn", unit="cfg", leave=False)
     ):
         set_global_seeds(42)
-        K.clear_session()
 
-        model = build_tcn(
-            input_shape=input_shape_seq,
-            blocks=blocks,
+        model = TCNRegressor(
+            input_size=input_shape_seq[1],
             channels=channels,
+            num_blocks=blocks,
             kernel_size=HP_TCN_KERNEL_SIZE,
             activation=activation,
-            learning_rate=lr,
-        )
-        history = model.fit(
-            X_tr_seq_s,
-            y_tr_s,
-            epochs=epochs,
-            batch_size=batch_size,
-            verbose=0,
-        )
-        y_pred_s = model.predict(X_te_seq_s, verbose=0).ravel()
+        ).to(device)
+
+        X_tr_tensor = torch.from_numpy(X_tr).float().to(device)
+        y_tr_tensor = torch.from_numpy(y_tr_s.astype(np.float32)).view(-1, 1).to(device)
+        X_te_tensor = torch.from_numpy(X_te).float().to(device)
+
+        train_dataset = TensorDataset(X_tr_tensor, y_tr_tensor)
+        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=False)
+
+        criterion = nn.MSELoss()
+        optimizer = optim.Adam(model.parameters(), lr=lr)
+
+        train_loss_last = None
+        for _epoch in range(epochs):
+            model.train()
+            epoch_loss = 0.0
+            n_samples = 0
+            for xb, yb in train_loader:
+                optimizer.zero_grad()
+                preds = model(xb)
+                loss = criterion(preds, yb)
+                loss.backward()
+                optimizer.step()
+                bs = xb.size(0)
+                epoch_loss += loss.item() * bs
+                n_samples += bs
+            train_loss_last = epoch_loss / max(n_samples, 1)
+
+        model.eval()
+        with torch.no_grad():
+            y_pred_s_tensor = model(X_te_tensor)
+        y_pred_s = y_pred_s_tensor.cpu().numpy().ravel()
         y_pred = sy.inverse_transform(y_pred_s.reshape(-1, 1)).ravel()
         metrics = compute_metrics(y_te, y_pred)
 
@@ -702,14 +871,20 @@ def run_tcn_grid(
             "model": "tcn",
             "config_index": config_idx,
             **hyperparams,
-            "train_loss_last": float(history.history["loss"][-1]),
+            "train_loss_last": float(train_loss_last) if train_loss_last is not None else None,
             **metrics,
         }
         results.append(row)
 
         if metrics["R2"] > best_r2:
             best_r2 = metrics["R2"]
-            model.save(best_model_path)
+            torch.save(model.state_dict(), best_model_path)
+
+        # Free memory for this config
+        del model, optimizer, train_loader, train_dataset, X_tr_tensor, y_tr_tensor, X_te_tensor, y_pred_s_tensor
+        gc.collect()
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
 
     return results
 
@@ -724,6 +899,7 @@ def train_models_for_market(
     end_date: str,
     lookback: int,
     train_ratio: float,
+    device: torch.device,
     max_configs: int | None = None,
 ) -> pd.DataFrame:
     """
@@ -834,7 +1010,12 @@ def train_models_for_market(
     # ----------------- MLP GRID -----------------
     mlp_results = run_core_grid_for_model(
         model_name="mlp",
-        build_fn=build_mlp,
+        build_fn=lambda input_dim, hidden_units, num_layers, activation: MLPRegressor(
+            input_dim=input_dim,
+            hidden_units=hidden_units,
+            num_layers=num_layers,
+            activation=activation,
+        ),
         X_tr_flat_s=X_tr_flat_s,
         X_te_flat_s=X_te_flat_s,
         X_tr_seq_s=X_tr_seq_s,
@@ -846,6 +1027,7 @@ def train_models_for_market(
         input_dim=input_dim,
         input_shape_seq=input_shape_seq,
         market=market,
+        device=device,
         max_configs=max_configs,
     )
     results.extend(mlp_results)
@@ -853,7 +1035,12 @@ def train_models_for_market(
     # ----------------- RNN GRID -----------------
     rnn_results = run_core_grid_for_model(
         model_name="rnn",
-        build_fn=build_rnn,
+        build_fn=lambda input_size, hidden_units, num_layers, activation: RNNRegressor(
+            input_size=input_size,
+            hidden_units=hidden_units,
+            num_layers=num_layers,
+            activation=activation,
+        ),
         X_tr_flat_s=X_tr_flat_s,
         X_te_flat_s=X_te_flat_s,
         X_tr_seq_s=X_tr_seq_s,
@@ -865,6 +1052,7 @@ def train_models_for_market(
         input_dim=input_dim,
         input_shape_seq=input_shape_seq,
         market=market,
+        device=device,
         max_configs=max_configs,
     )
     results.extend(rnn_results)
@@ -872,7 +1060,12 @@ def train_models_for_market(
     # ----------------- LSTM GRID -----------------
     lstm_results = run_core_grid_for_model(
         model_name="lstm",
-        build_fn=build_lstm,
+        build_fn=lambda input_size, hidden_units, num_layers, activation: LSTMRegressor(
+            input_size=input_size,
+            hidden_units=hidden_units,
+            num_layers=num_layers,
+            activation=activation,
+        ),
         X_tr_flat_s=X_tr_flat_s,
         X_te_flat_s=X_te_flat_s,
         X_tr_seq_s=X_tr_seq_s,
@@ -884,6 +1077,7 @@ def train_models_for_market(
         input_dim=input_dim,
         input_shape_seq=input_shape_seq,
         market=market,
+        device=device,
         max_configs=max_configs,
     )
     results.extend(lstm_results)
@@ -891,7 +1085,12 @@ def train_models_for_market(
     # ----------------- GRU GRID -----------------
     gru_results = run_core_grid_for_model(
         model_name="gru",
-        build_fn=build_gru,
+        build_fn=lambda input_size, hidden_units, num_layers, activation: GRURegressor(
+            input_size=input_size,
+            hidden_units=hidden_units,
+            num_layers=num_layers,
+            activation=activation,
+        ),
         X_tr_flat_s=X_tr_flat_s,
         X_te_flat_s=X_te_flat_s,
         X_tr_seq_s=X_tr_seq_s,
@@ -903,6 +1102,7 @@ def train_models_for_market(
         input_dim=input_dim,
         input_shape_seq=input_shape_seq,
         market=market,
+        device=device,
         max_configs=max_configs,
     )
     results.extend(gru_results)
@@ -917,6 +1117,7 @@ def train_models_for_market(
         sy=sy,
         input_shape_seq=input_shape_seq,
         market=market,
+        device=device,
         max_configs=max_configs,
     )
     results.extend(tcn_results)
@@ -936,7 +1137,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
             "Hyperparameter grid search for CO2 markets using processed "
-            "feature panels in data/co2_processed."
+            "feature panels in data/co2_processed (PyTorch backend)."
         )
     )
     parser.add_argument(
@@ -975,7 +1176,7 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help=(
             "Optional cap on number of configs per model (for debugging). "
-            "If None, run full 243 configs."
+            "If None, run full 486 configs."
         ),
     )
     return parser.parse_args()
@@ -990,13 +1191,16 @@ def main() -> None:
     markets = args.markets
     max_configs = args.max_configs
 
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print_gpu_info(device)
+
     print(
-        f"[RUN] CO2 hyperparam pipeline\n"
+        f"[RUN] CO2 hyperparam pipeline (PyTorch)\n"
         f"      Date range: {start_date} -> {end_date}\n"
         f"      Lookback:   {lookback}\n"
         f"      Train ratio:{train_ratio}\n"
         f"      Markets:    {markets}\n"
-        f"      Max configs:{max_configs if max_configs is not None else 'FULL (243)'}"
+        f"      Max configs:{max_configs if max_configs is not None else 'FULL (486)'}"
     )
 
     all_metrics: List[pd.DataFrame] = []
@@ -1015,6 +1219,7 @@ def main() -> None:
                 end_date=end_date,
                 lookback=lookback,
                 train_ratio=train_ratio,
+                device=device,
                 max_configs=max_configs,
             )
             all_metrics.append(mkt_df)
