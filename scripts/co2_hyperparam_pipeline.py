@@ -110,7 +110,7 @@ CO2_PROCESSED_FILES: Dict[str, str] = {
 
 # Defaults (overridable via CLI)
 START_DATE_DEFAULT = "2022-09-01"
-END_DATE_DEFAULT = "2022-12-31"
+END_DATE_DEFAULT = "2025-06-30"
 LOOKBACK_DEFAULT = 9  # 9 days history + 1 day ahead = 10-day rolling window
 TRAIN_RATIO_DEFAULT = 0.8
 
