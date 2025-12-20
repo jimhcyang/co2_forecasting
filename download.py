@@ -13,11 +13,11 @@ For each local CO2 market file in data/co2:
    - Four common commodity tickers: CL=F, NG=F, RB=F, HRC=F.
    Each is aligned to the same business-day index and interpolated/fill.
 4. Compute 6 technical indicators **on the CO2 price only**:
-   SMA_5, PPO_5_10, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10.
+   SMA_3, PPO_5_10, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10.
 5. Truncate the final DataFrame to dates **on/after 2022-09-01**.
 6. Save one CSV per market with 13 columns:
    [Price, equity_index, fx_rate, CL_F, NG_F, RB_F, HRC_F,
-    SMA_5, PPO_5_10, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10].
+    SMA_3, PPO_5_10, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10].
 
 All indices are BUSINESS DAYS only.
 """
@@ -33,7 +33,7 @@ from typing import Dict, List
 # ---------------------------------------------------------------------
 
 START_DATE = "2022-01-01"
-END_DATE = "2025-06-30"
+END_DATE = "2025-08-31"
 FREQ = "B"  # business days
 TRUNCATE_START = "2022-09-01"  # keep only data from this date onward
 
@@ -104,7 +104,7 @@ def compute_price_technicals(price: pd.Series) -> pd.DataFrame:
     """
     Compute 6 indicators from a single price series:
 
-        SMA_5:
+        SMA_3:
             5-day simple moving average of CO₂ price
             → short-term trend of the carbon price.
 
@@ -137,8 +137,8 @@ def compute_price_technicals(price: pd.Series) -> pd.DataFrame:
     price = pd.to_numeric(price, errors="coerce")
     price = price.sort_index()
 
-    # 1) SMA_5 – 5-day SMA
-    SMA_5 = price.rolling(window=5, min_periods=1).mean()
+    # 1) SMA_3 – 3-day SMA
+    SMA_3 = price.rolling(window=3, min_periods=1).mean()
 
     # 2) PPO_5_10 = (EMA_5 - EMA_10) / EMA_10 * 100
     ema_fast = price.ewm(span=5, adjust=False).mean()
@@ -171,7 +171,7 @@ def compute_price_technicals(price: pd.Series) -> pd.DataFrame:
 
     out = pd.DataFrame(
         {
-            "SMA_5": SMA_5,
+            "SMA_3": SMA_3,
             "PPO_5_10": ppo_5_10,
             "RSI_14": rsi_14,
             "ROC_10": roc_10,

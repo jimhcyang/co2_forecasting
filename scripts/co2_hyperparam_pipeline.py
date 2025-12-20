@@ -110,9 +110,9 @@ CO2_PROCESSED_FILES: Dict[str, str] = {
 
 # Defaults (overridable via CLI)
 START_DATE_DEFAULT = "2022-09-01"
-END_DATE_DEFAULT = "2025-06-30"
+END_DATE_DEFAULT = "2025-08-31"
 LOOKBACK_DEFAULT = 9  # 9 days history + 1 day ahead = 10-day rolling window
-TRAIN_RATIO_DEFAULT = 0.8
+TRAIN_RATIO_DEFAULT = 0.11111
 
 # -------------------------------------------------------------------
 # HYPERPARAMETER GRIDS
@@ -940,7 +940,8 @@ def train_models_for_market(
     print(f"[INFO] {market} sequence dataset: X={X.shape}, y={y.shape}")
 
     # 4) Train/test split (chronological; last 20% is test)
-    split = int(N * train_ratio)
+    split = int(np.ceil(N * train_ratio))
+    split = max(1, min(split, N - 1))
     if split <= 0 or split >= N:
         raise ValueError(f"{market}: invalid train/test split with N={N}")
 
