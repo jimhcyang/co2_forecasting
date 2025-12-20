@@ -1,2 +1,0 @@
-market,model_name,config_index,model_hyperparameters_dict,start_date,end_date,test_data_values_list,test_data_model_predictions_list
-California,NAIVE_LAST_PRICE,-1,{},2022-10-20 00:00:00,2022-10-28 00:00:00,"[17.22, 17.46, 17.59, 17.58, 17.88, 18.0, 18.53]","[17.23, 17.22, 17.46, 17.59, 17.58, 17.88, 18.0]"

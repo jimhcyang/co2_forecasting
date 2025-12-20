@@ -9,9 +9,6 @@ numpy>=1.26
 pandas>=2.2
 scikit-learn>=1.4
 
-# Gradient boosting
-xgboost>=2.1
-
 # Data sources / IO
 yfinance>=0.2.44
 openpyxl>=3.1

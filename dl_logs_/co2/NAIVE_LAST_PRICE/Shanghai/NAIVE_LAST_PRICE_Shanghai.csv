@@ -1,2 +1,0 @@
-market,model_name,config_index,model_hyperparameters_dict,start_date,end_date,test_data_values_list,test_data_model_predictions_list
-Shanghai,NAIVE_LAST_PRICE,-1,{},2022-12-08 00:00:00,2022-12-29 00:00:00,"[55.44, 55.6125, 55.67, 55.14, 55.42, 54.9, 54.86, 55.435, 56.01, 56.585, 57.16, 55.23, 57.11, 57.36, 58.94, 54.01]","[55.24, 55.44, 55.6125, 55.67, 55.14, 55.42, 54.9, 54.86, 55.435, 56.01, 56.585, 57.16, 55.23, 57.11, 57.36, 58.94]"
