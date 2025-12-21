@@ -15,12 +15,11 @@ For each local CO2 market file in data/co2:
    - Common commodity tickers: CL=F, NG=F, RB=F, HRC=F, ALI=F.
    Each is aligned to the same business-day index and interpolated/fill.
 4. Compute 6 technical indicators **on the CO2 price only**:
-   SMA_20, PPO_12_26, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10.
+   SMA_5, PPO_12_26, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10.
 5. Truncate the final DataFrame to dates **on/after 2022-09-01**.
 6. Save one CSV per market with 14 columns:
    [Price, equity_index, fx_rate, CL_F, NG_F, RB_F, HRC_F, ALI_F,
-    SMA_20, PPO_12_26, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10].
-
+    SMA_5, PPO_12_26, RSI_14, ROC_10, ATR_14, CO_chaikin_3_10].
 All indices are BUSINESS DAYS only.
 """
 
@@ -115,7 +114,7 @@ YF_CACHE: Dict[str, pd.Series] = {}
 def compute_price_technicals(price: pd.Series) -> pd.DataFrame:
     """
     Compute 6 indicators from a single price series:
-      - SMA_20
+      - SMA_5
       - PPO_12_26
       - RSI_14
       - ROC_10
@@ -125,8 +124,8 @@ def compute_price_technicals(price: pd.Series) -> pd.DataFrame:
     price = pd.to_numeric(price, errors="coerce")
     price = price.sort_index()
 
-    # 1) SMA_20 – 20-day SMA
-    SMA_20 = price.rolling(window=20, min_periods=1).mean()
+    # 1) SMA_5 – 20-day SMA
+    sma_5 = price.rolling(window=5, min_periods=1).mean()
 
     # 2) PPO_12_26 = (EMA_12 - EMA_26) / EMA_26 * 100
     ema_fast = price.ewm(span=12, adjust=False).mean()
@@ -159,7 +158,7 @@ def compute_price_technicals(price: pd.Series) -> pd.DataFrame:
 
     out = pd.DataFrame(
         {
-            "SMA_20": SMA_20,
+            "SMA_5": sma_5,
             "PPO_12_26": ppo_12_26,
             "RSI_14": rsi_14,
             "ROC_10": roc_10,
