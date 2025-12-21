@@ -6,6 +6,17 @@ The core goal is:
 
 > Use **today’s data** (including today’s CO₂ price and macro/technical features) to predict **tomorrow’s CO₂ price**.
 
+**Evaluation + ranking convention (repo-wide):**
+
+- We always *report* metrics in this order:
+  1) **MAPE**  2) **RMSE/mean(price)**  3) **MAE**  4) **R²**
+- We always pick “best” configs by:
+  **min MAPE → min RMSE/mean(price) → min MAE → max R²**.
+
+This repo supports both:
+- **Tuning** (grid search) that selects best configs using the above rule.
+- **Final evaluation** on a later date range (no tuning) using `evaluate_best.py`, logging to `test_log/`.
+
 ---
 
 ## Directory structure
@@ -15,11 +26,13 @@ Recommended layout:
 ```
 repo_root/
   scripts/
-    input.py      # builds processed per-market feature CSVs
-    models.py     # model definitions + rolling-window walk-forward evaluation
-    tuning.py     # hyperparameter grid search + logging + summary outputs
+    input.py          # builds processed per-market feature CSVs
+    models.py         # model definitions + rolling-window walk-forward evaluation
+    tuning.py         # hyperparameter grid search + logging + summary outputs (best = MAPE-first)
+    evaluate_best.py  # run the chosen best configs on a (later) evaluation range; logs to test_log/
+    score_logs.py     # optional: aggregate dl_logs into per-config scores + best-config JSON (MAPE-first)
   data/
-    co2/          # raw market files (Excel/CSV, per MARKET_CONFIGS in input.py)
+    co2/              # raw market files (Excel/CSV, per MARKET_CONFIGS in input.py)
     co2_processed/
       Australia_features.csv
       California_features.csv
@@ -29,11 +42,22 @@ repo_root/
       <MODEL>/
         <MARKET>/
           <MODEL>_<MARKET>.csv
+  test_log/
+    co2/
+      <MODEL>/
+        <MARKET>/
+          <MODEL>_<MARKET>.csv
   results/
     co2_hparam_metrics.csv
     co2_best_configs.json
+    co2_test_metrics.csv
+    # optional (if you run score_logs.py):
+    # co2_config_scores.csv
+    # co2_best_by_market_model.csv
+    # co2_best_by_model_across_markets.csv
   requirements.txt
 ```
+
 
 > **If you renamed files:**  
 > - `tuning.py` imports `from models import ...`  
@@ -173,11 +197,13 @@ Implemented in `scripts/models.py`:
 - `hidden_units ∈ {32, 64, 128}`
 - `num_layers ∈ {2, 3, 4}`
 - `activation ∈ {relu, tanh, swish}`
-- `learning_rate ∈ {1e-2, 3e-3, 1e-3}`
-- `batch_size ∈ {16, 32, 64}`
-- `epochs ∈ {32, 64}`
+- `learning_rate ∈ {1e-2, 3e-3, 1e-3, 3e-4, 1e-4}`
+- `batch_size ∈ {32}`
+- `epochs ∈ {16, 32, 64}`
 
-Total: **486 configs per model**
+Total (default in `tuning.py`): **405 configs per model**
+
+> You can expand/shrink these lists in `scripts/tuning.py` to trade off compute vs coverage.
 
 ### TCN grid
 - `channels ∈ {32, 64, 128}`
@@ -185,18 +211,26 @@ Total: **486 configs per model**
 - `kernel_size = 5` (fixed)
 - plus the same `{activation, learning_rate, batch_size, epochs}`
 
-Total: **486 configs**
+Total (default in `tuning.py`): **405 configs**
 
 ### What “best” means
-After evaluating predictions across all rolling windows for a config, we compute:
+After evaluating predictions across **all rolling windows** for a config, we compute (repo-wide metric order):
 
-- RMSE
-- MAPE
-- R²
+1. **MAPE** (lower is better)
+2. **RMSE/mean(price)** a.k.a. `RMSE_over_mean_price` (lower is better)
+3. **MAE** (lower is better)
+4. **R²** (higher is better)
 
-`tuning.py` selects the **best config per (market, model)** by **highest R²** and saves it.
+We may also record `RMSE`, `mean_price`, and `n_samples` as helpful auxiliary fields.
+
+`tuning.py` selects the **best config per (market, model)** by:
+
+**min MAPE → min RMSE/mean(price) → min MAE → max R²**
+
+This same rule is also used by `score_logs.py` when aggregating from log files.
 
 ---
+
 
 ## Outputs
 
@@ -217,6 +251,8 @@ Each row includes:
 - plus metadata like market/date range
 
 This mirrors the “list-in-a-row” logging style used elsewhere in your project.
+
+> **Note:** these logs store per-window *predictions*, not per-window metrics. All metrics (MAPE/RMSE/MAE/R²) are computed **once per config** on the full concatenated `y_true/y_pred` across all windows. If you want to reduce disk I/O, you can run `tuning.py` or `evaluate_best.py` with `--no-logs`.
 
 ### 2) Summary metrics per config
 
@@ -248,6 +284,24 @@ Structure:
   ...
 }
 ```
+
+### 4) Final evaluation logs (no tuning)
+
+After you have selected best configs, you can run **out-of-sample evaluation** (e.g., later dates) using `evaluate_best.py`.
+Per-window logs are written to:
+
+```
+test_log/co2/<MODEL>/<MARKET>/<MODEL>_<MARKET>.csv
+```
+
+### 5) Final evaluation summary metrics
+
+Aggregated metrics for the evaluation run are written to:
+
+```
+results/co2_test_metrics.csv
+```
+
 
 ---
 
@@ -298,6 +352,37 @@ python -m scripts.tuning --skip-existing --start 2022-09-01 --end 2023-01-02 --w
 python -m scripts.tuning --max-configs 5 --max-windows 30 --markets Australia
 ```
 
+
+### 3) (Optional) Aggregate from `dl_logs/` if you resumed runs
+
+If you ran tuning in multiple sessions (or want to recompute best configs from logs), you can aggregate logs into scores and best-config files:
+
+```bash
+python -m scripts.score_logs
+```
+
+This writes `results/co2_config_scores.csv` and re-creates `results/co2_best_configs.json` using the **MAPE-first** rule.
+
+### 4) Run final evaluation with the chosen best configs (no tuning)
+
+Example (default date range 2023-01-01 → 2025-11-30):
+
+```bash
+python -m scripts.evaluate_best
+```
+
+Evaluate a subset of markets:
+
+```bash
+python -m scripts.evaluate_best --markets Australia EU_EEX
+```
+
+Skip any market/model pairs that already have a `test_log/` file:
+
+```bash
+python -m scripts.evaluate_best --skip-existing
+```
+
 ---
 
 ## Selecting HPs for later evaluation
@@ -305,17 +390,17 @@ python -m scripts.tuning --max-configs 5 --max-windows 30 --markets Australia
 After tuning completes:
 
 1. Open `results/co2_best_configs.json`
-2. For each market/model, read the chosen hyperparameters (highest R²)
-3. Use those HPs in your later “final evaluation” runs
+2. For each market/model, read the chosen hyperparameters (**chosen by min MAPE**, ties by RMSE/mean, MAE, then max R²)
+3. Run `evaluate_best.py` on your final evaluation date range (and log to `test_log/`)
 
-If you want to rank by RMSE or MAPE instead, you can filter/sort `results/co2_hparam_metrics.csv` accordingly.
+If you want to re-rank or audit the selection, use `results/co2_hparam_metrics.csv` (per-config summaries) or run `scripts/score_logs.py` to aggregate from `dl_logs/`.
 
 ---
 
 ## Notes / cautions
 
 - **Compute cost**: full grid search is large:
-  - 6 markets × (4 core models × 486 + TCN 486 + baseline)  
+  - 6 markets × (4 core models × 405 + TCN 405 + baseline)  
   This can take a long time on CPU.
 - **Window size tradeoff**:
   - Small `window_size` adapts quickly but uses fewer training points per window.
@@ -328,5 +413,7 @@ If you want to rank by RMSE or MAPE instead, you can filter/sort `results/co2_hp
 
 - `scripts/input.py`: build processed features
 - `scripts/models.py`: models + rolling evaluation (library)
-- `scripts/tuning.py`: grid search tuning + logs + best configs
+- `scripts/tuning.py`: grid search tuning + logs + best configs (MAPE-first)
+- `scripts/evaluate_best.py`: final evaluation (no tuning) using `results/co2_best_configs.json` → logs to `test_log/` + writes `results/co2_test_metrics.csv`
+- `scripts/score_logs.py`: optional aggregation from `dl_logs/` to rebuild `results/co2_best_configs.json` (MAPE-first)
 

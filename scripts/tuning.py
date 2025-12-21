@@ -29,7 +29,7 @@ Outputs
 
 2) Summary metrics per config:
    results/co2_hparam_metrics.csv
-   results/co2_best_configs.json
+   results/co2_best_configs.json (best = min MAPE, ties by RMSE/mean, MAE, then max R2)
 """
 
 import argparse
@@ -83,9 +83,9 @@ CO2_PROCESSED_FILES: Dict[str, str] = {
 HP_HIDDEN_UNITS = [32, 64, 128]
 HP_NUM_LAYERS = [2, 3, 4]
 HP_ACTIVATIONS = ["relu", "tanh", "swish"]
-HP_LR = [1e-2, 3e-3, 1e-3]
-HP_BATCH_SIZE = [16, 32, 64]
-HP_EPOCHS = [32, 64]
+HP_LR = [1e-2, 3e-3, 1e-3, 3e-4, 1e-4]
+HP_BATCH_SIZE = [32]
+HP_EPOCHS = [16, 32 ,64]
 
 HP_TCN_CHANNELS = [32, 64, 128]
 HP_TCN_BLOCKS = [2, 3, 4]
@@ -131,8 +131,8 @@ def _tcn_grid() -> List[Dict[str, Any]]:
 
 CORE_GRID = _core_grid()
 TCN_GRID = _tcn_grid()
-assert len(CORE_GRID) == 486
-assert len(TCN_GRID) == 486
+assert len(CORE_GRID) == (len(HP_HIDDEN_UNITS)*len(HP_NUM_LAYERS)*len(HP_ACTIVATIONS)*len(HP_LR)*len(HP_BATCH_SIZE)*len(HP_EPOCHS))
+assert len(TCN_GRID) == (len(HP_TCN_CHANNELS)*len(HP_TCN_BLOCKS)*len(HP_ACTIVATIONS)*len(HP_LR)*len(HP_BATCH_SIZE)*len(HP_EPOCHS))
 
 
 # -----------------------------
@@ -235,7 +235,8 @@ def run_market(
 
         desc = f"{market}-{model_name}"
         for enum_idx, hp in enumerate(tqdm(grid, desc=desc, unit="cfg", leave=False)):
-            cfg_idx = int(hp.pop("__config_index", enum_idx))
+            hp_local = dict(hp)
+            cfg_idx = int(hp_local.pop("__config_index", enum_idx))
 
             if skip_existing and cfg_idx in existing_cfg_idx:
                 continue
@@ -243,7 +244,7 @@ def run_market(
             sw = sliding_window_forecast(
                 df=df,
                 model_name=model_name,
-                hp=hp,
+                hp=hp_local,
                 target_col="y",
                 window_size=window_size,
                 test_ratio=test_ratio,
@@ -262,7 +263,8 @@ def run_market(
                 "test_ratio": float(test_ratio),
                 "n_windows": int(sw.n_windows),
                 "train_loss_last_mean": float(sw.train_loss_last_mean) if np.isfinite(sw.train_loss_last_mean) else None,
-                **hp,
+                "hyperparams_json": json.dumps(hp_local, sort_keys=True),
+                **hp_local,
                 **metrics,
             }
             rows.append(row)
@@ -329,8 +331,41 @@ def main() -> None:
 
             best_cfg[market] = {}
             for model in df_metrics["model"].unique():
-                sub = df_metrics[df_metrics["model"] == model].sort_values("R2", ascending=False)
-                best_cfg[market][model] = sub.iloc[0].to_dict()
+                sub = df_metrics[df_metrics["model"] == model].sort_values(
+                    ["MAPE", "RMSE_over_mean_price", "MAE", "R2"],
+                    ascending=[True, True, True, False],
+                    kind="stable",
+                )
+                best_row = sub.iloc[0].to_dict()
+
+                hp_dict: Dict[str, Any] = {}
+                hp_json = best_row.get("hyperparams_json")
+                if isinstance(hp_json, str) and hp_json.strip():
+                    try:
+                        hp_dict = json.loads(hp_json)
+                    except Exception:
+                        hp_dict = {}
+
+                best_cfg[market][model] = {
+                    "market": market,
+                    "model": model,
+                    "config_index": int(best_row.get("config_index", -1)),
+                    "window_size": int(best_row.get("window_size", args.window_size)),
+                    "test_ratio": float(best_row.get("test_ratio", args.test_ratio)),
+                    "n_windows": int(best_row.get("n_windows", 0)),
+                    "n_samples": int(best_row.get("n_samples", 0)) if best_row.get("n_samples") is not None else None,
+                    "mean_price": float(best_row.get("mean_price")) if best_row.get("mean_price") is not None else None,
+                    # metric priority: MAPE, RMSE/mean, MAE, R2
+                    "MAPE": float(best_row.get("MAPE")) if best_row.get("MAPE") is not None else None,
+                    "RMSE_over_mean_price": float(best_row.get("RMSE_over_mean_price")) if best_row.get("RMSE_over_mean_price") is not None else None,
+                    "MAE": float(best_row.get("MAE")) if best_row.get("MAE") is not None else None,
+                    "R2": float(best_row.get("R2")) if best_row.get("R2") is not None else None,
+                    # extras
+                    "RMSE": float(best_row.get("RMSE")) if best_row.get("RMSE") is not None else None,
+                    "train_loss_last_mean": float(best_row.get("train_loss_last_mean")) if best_row.get("train_loss_last_mean") is not None else None,
+                    "hyperparams": hp_dict,
+                    "hyperparams_json": best_row.get("hyperparams_json", json.dumps(hp_dict, sort_keys=True)),
+                }
 
             print(f"[DONE] {market}: produced {len(df_metrics)} summary rows.")
         except Exception as e:
@@ -342,6 +377,12 @@ def main() -> None:
 
     out = pd.concat(all_rows, ignore_index=True)
     out_path = RESULTS_DIR / "co2_hparam_metrics.csv"
+
+    # Consistent metric display order
+    metric_cols = ["MAPE", "RMSE_over_mean_price", "MAE", "R2"]
+    front_cols = ["market", "model", "config_index", "window_size", "test_ratio", "n_windows"] + metric_cols
+    ordered_cols = [c for c in front_cols if c in out.columns] + [c for c in out.columns if c not in front_cols]
+    out = out[ordered_cols]
     out.to_csv(out_path, index=False)
     print(f"[INFO] Wrote: {out_path}")
 

@@ -56,7 +56,7 @@ import numpy as np
 import pandas as pd
 
 from sklearn.preprocessing import RobustScaler, StandardScaler
-from sklearn.metrics import mean_squared_error, mean_absolute_percentage_error, r2_score
+from sklearn.metrics import mean_squared_error, mean_absolute_error, mean_absolute_percentage_error, r2_score
 
 import torch
 import torch.nn as nn
@@ -76,12 +76,38 @@ def set_global_seeds(seed: int = 42) -> None:
 
 
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, float]:
+    """Compute aggregated metrics on full y_true/y_pred arrays.
+
+    **Metric priority across this repo (for ranking + display):**
+      1) MAPE (lower is better)
+      2) RMSE_over_mean_price (lower is better)
+      3) MAE (lower is better)
+      4) R2 (higher is better)
+
+    We also return RMSE, mean_price, n_samples as helpful auxiliary fields.
+    """
     y_true = np.asarray(y_true, dtype=float)
     y_pred = np.asarray(y_pred, dtype=float)
+
     rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
+    mae = float(mean_absolute_error(y_true, y_pred))
     mape = float(mean_absolute_percentage_error(y_true, y_pred))
     r2 = float(r2_score(y_true, y_pred))
-    return {"RMSE": rmse, "MAPE": mape, "R2": r2, "n_samples": int(len(y_true))}
+
+    mean_price = float(np.mean(y_true)) if len(y_true) else float("nan")
+    rmse_over_mean = float(rmse / mean_price) if mean_price not in (0.0, np.nan) else float("nan")
+
+    # IMPORTANT: keep insertion order = display order
+    return {
+        "MAPE": mape,
+        "RMSE_over_mean_price": rmse_over_mean,
+        "MAE": mae,
+        "R2": r2,
+        # extras (decorative; not used for ranking unless you explicitly do so)
+        "RMSE": rmse,
+        "mean_price": mean_price,
+        "n_samples": int(len(y_true)),
+    }
 
 
 def _to_2d(x: np.ndarray) -> np.ndarray:

@@ -16,6 +16,7 @@ openpyxl>=3.1
 # Utilities
 tqdm>=4.66
 matplotlib>=3.8
+seaborn>=0.13
 
 # Jupyter / VS Code kernel
 ipykernel>=6.0

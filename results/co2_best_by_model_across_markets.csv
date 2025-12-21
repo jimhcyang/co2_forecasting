@@ -1,0 +1,7 @@
+model,hyperparams_json,markets_covered,mean_MAPE,mean_RMSE_over_mean_price,mean_MAE,mean_R2
+gru,"{""activation"": ""relu"", ""batch_size"": 16, ""epochs"": 16, ""hidden_units"": 64, ""learning_rate"": 0.003, ""num_layers"": 4}",6,0.013043897812154343,0.0184838608249912,0.7157456356154065,0.5915800855564189
+lstm,"{""activation"": ""relu"", ""batch_size"": 16, ""epochs"": 16, ""hidden_units"": 128, ""learning_rate"": 0.003, ""num_layers"": 4}",6,0.013105571038492731,0.0189577720366616,0.7112593627551926,0.5872417670261347
+mlp,"{""activation"": ""tanh"", ""batch_size"": 16, ""epochs"": 16, ""hidden_units"": 64, ""learning_rate"": 0.001, ""num_layers"": 2}",6,0.013492146634163487,0.018625381197622637,0.741492309376624,0.630002244094887
+naive_last_price,{},6,0.010324633024173217,0.015897353949302365,0.558419289044289,0.6901145885391039
+rnn,"{""activation"": ""relu"", ""batch_size"": 16, ""epochs"": 16, ""hidden_units"": 64, ""learning_rate"": 0.001, ""num_layers"": 2}",6,0.013165208074810973,0.01823250002515738,0.7212387985657016,0.6420156419783448
+tcn,"{""activation"": ""tanh"", ""batch_size"": 64, ""blocks"": 4, ""channels"": 64, ""epochs"": 16, ""kernel_size"": 5, ""learning_rate"": 0.01}",6,0.01368790107655656,0.019055681290980356,0.7512681438807883,0.592463072009975
