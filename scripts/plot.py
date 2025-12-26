@@ -32,7 +32,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 
 
-MARKETS = ["Australia", "California", "EU_EEX", "NewZealand", "RGGI", "Shanghai"]
+MARKETS = ["China", "Korea", "Australia", "California", "EuropeanUnion", "NewZealand", "RGGI"]
 
 DEFAULT_SLICE_START = "2022-09-01"
 DEFAULT_SLICE_END = "2023-01-02"

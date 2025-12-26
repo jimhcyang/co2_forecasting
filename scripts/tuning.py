@@ -67,12 +67,13 @@ DL_LOG_BASE.mkdir(parents=True, exist_ok=True)
 # -----------------------------
 
 CO2_PROCESSED_FILES: Dict[str, str] = {
+    "China": "China_features.csv",
+    "Korea": "Korea_features.csv",
     "Australia": "Australia_features.csv",
     "California": "California_features.csv",
-    "EU_EEX": "EU_EEX_features.csv",
+    "EuropeanUnion": "EuropeanUnion_features.csv",
     "NewZealand": "NewZealand_features.csv",
     "RGGI": "RGGI_features.csv",
-    "Shanghai": "Shanghai_features.csv",
 }
 
 
